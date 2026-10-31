@@ -1,0 +1,2 @@
+import workbook from '../samples/import-example.xlsx?inline';
+export function sampleWorkbookFile(){const data=workbook.split(',')[1];if(!data)throw Error('تعذر فتح الكشف النموذجي.');const binary=atob(data),bytes=new Uint8Array(binary.length);for(let i=0;i<binary.length;i++)bytes[i]=binary.charCodeAt(i);return new File([bytes],'tajer-example.xlsx',{type:'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'});}
