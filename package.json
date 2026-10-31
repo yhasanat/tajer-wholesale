@@ -1,0 +1,32 @@
+{
+  "name": "tajer-github-pages",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22.13.0"
+  },
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "develop": "vite",
+    "preview": "vite preview",
+    "test": "node --experimental-strip-types --test tests/*.test.mjs",
+    "check": "tsc --noEmit"
+  },
+  "dependencies": {
+    "fflate": "0.7.4",
+    "lucide-react": "1.31.0",
+    "react": "19.2.6",
+    "react-dom": "19.2.6"
+  },
+  "devDependencies": {
+    "@types/node": "22.19.19",
+    "@types/react": "19.2.14",
+    "@types/react-dom": "19.2.3",
+    "@vitejs/plugin-react": "6.0.2",
+    "@xmldom/xmldom": "^0.9.12",
+    "fake-indexeddb": "^6.2.7",
+    "typescript": "5.9.3",
+    "vite": "8.0.13"
+  }
+}
