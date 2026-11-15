@@ -35,3 +35,35 @@ test('restore conflicts and invalid backups leave the current data untouched',as
 test('recovery snapshots are bounded and data changes remain atomic',async()=>{
   const store=make();for(let n=0;n<12;n++){const state=demoState();state.settings.name='Snapshot '+n;await store.restore(state,n,'restore-'+n);}const snapshots=await store.snapshots();assert.equal(snapshots.length,8);assert.equal((await store.load()).settings.name,'Snapshot 11');await store.close();
 });
+
+test('upgrading a version 1 database keeps saved records, retries and snapshots',async()=>{
+  const factory=new IDBFactory(),name='legacy-v1';
+  const state=demoState();
+  delete state.stockMovements;
+  const old=await new Promise((resolve,reject)=>{
+    const req=factory.open(name,1);
+    req.onerror=()=>reject(req.error);
+    req.onupgradeneeded=()=>{
+      const app=req.result.createObjectStore('app');
+      const operations=req.result.createObjectStore('operations',{keyPath:'id'});
+      const snapshots=req.result.createObjectStore('snapshots',{keyPath:'id'});
+      operations.createIndex('createdAt','createdAt');
+      snapshots.createIndex('createdAt','createdAt');
+      app.put(state,'main');
+      operations.put({id:'old-op',entityId:state.containers[0].id,createdAt:'2026-01-03'});
+      snapshots.put({id:'old-snapshot',createdAt:'2026-01-03',reason:'ترحيل',summary:{items:state.items.length,sales:state.sales.length},state});
+    };
+    req.onsuccess=()=>resolve(req.result);
+  });
+  let versionChange=0;
+  old.onversionchange=event=>{versionChange=event.newVersion;old.close();};
+  const upgraded=make(name,factory);
+  const loaded=await upgraded.load();
+  assert.equal(versionChange,2);
+  assert.deepEqual(loaded,{...state,stockMovements:[]});
+  const retry=await upgraded.mutate(0,'old-op',addContainer);
+  assert.equal(retry.entityId,state.containers[0].id);
+  assert.equal(retry.state.containers.length,state.containers.length);
+  assert.equal((await upgraded.snapshots())[0].id,'old-snapshot');
+  await upgraded.close();
+});
