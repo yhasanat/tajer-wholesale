@@ -3,9 +3,9 @@ import {emptyState, currencies, variant, calculateContainer, cents, adjustedOut,
   itemGroupKey, regularProductKey, isReceived, itemReceiptDate, additionalStockValue,
   sharedCostRemaining} from './domain.ts';
 
-export type BackupFile={format:'tajer-backup';version:3;app:'tajer-github-pages';exportedAt:string;demo:boolean;state:State};
+export type BackupFile={format:'tajer-backup';version:4;app:'tajer-github-pages';exportedAt:string;demo:boolean;state:State};
 export type BackupSummary={containers:number;items:number;sales:number;customers:number;payments:number;annexes:number;movements:number};
-const collections=['containers','items','costs','customers','sales','payments','operatingExpenses','stockMovements'] as const;
+const collections=['containers','items','costs','customers','sales','payments','operatingExpenses','stockMovements','valuationChanges'] as const;
 function ensure(ok:unknown,message:string):asserts ok{if(!ok)throw Error('النسخة الاحتياطية غير صالحة: '+message);}
 function obj(v:unknown,label:string):Record<string,any>{ensure(v&&typeof v==='object'&&!Array.isArray(v),label+' مفقود');return v as Record<string,any>;}
 function str(v:unknown,label:string,required=false){ensure(typeof v==='string'&&v.length<=15000&&(!required||v.trim().length>0),label+' غير صحيح');}
@@ -16,20 +16,21 @@ export function backupSummary(state:State):BackupSummary {
   return {containers:state.containers.filter(container=>!container.parentId).length,
     items:state.items.length,sales:state.sales.length,customers:state.customers.length,
     payments:state.payments.length,annexes:state.containers.filter(container=>container.parentId).length,
-    movements:state.stockMovements?.length??0};
+    movements:(state.stockMovements?.length??0)+(state.valuationChanges?.length??0)};
 }
-export function makeBackup(state:State,demo=false):BackupFile{return {format:'tajer-backup',version:3,app:'tajer-github-pages',exportedAt:new Date().toISOString(),demo,state:structuredClone(state)};}
+export function makeBackup(state:State,demo=false):BackupFile{return {format:'tajer-backup',version:4,app:'tajer-github-pages',exportedAt:new Date().toISOString(),demo,state:structuredClone(state)};}
 export function parseBackup(input:string|unknown){let raw:unknown=input;if(typeof input==='string'){ensure(input.length<=25*1024*1024,'حجم الملف أكبر من المسموح');try{raw=JSON.parse(input);}catch{throw Error('الملف ليس نسخة JSON صالحة. اختر نسخة احتياطية صادرة من برنامج تاجر.');}}
   const root=obj(raw,'الملف');
-  ensure(root.format==='tajer-backup'&&[1,2,3].includes(root.version),'اختر نسخة احتياطية صادرة من برنامج تاجر');
-  if(root.version===3) ensure(Array.isArray(obj(root.state,'البيانات').stockMovements),'سجل حركات المخزون مفقود');
+  ensure(root.format==='tajer-backup'&&[1,2,3,4].includes(root.version),'اختر نسخة احتياطية صادرة من برنامج تاجر');
+  if(root.version>=3) ensure(Array.isArray(obj(root.state,'البيانات').stockMovements),'سجل حركات المخزون مفقود');
+  if(root.version===4) ensure(Array.isArray(obj(root.state,'البيانات').valuationChanges),'سجل تصحيح الكميات ومشاركة المصاريف مفقود');
   const state=validateState(root.state);
   return {state,exportedAt:typeof root.exportedAt==='string'?root.exportedAt:'',demo:root.demo===true,summary:backupSummary(state)};
 }
 export function validateState(value:unknown):State{
   const raw=obj(value,'البيانات'),state=emptyState();
   for(const key of collections){
-    if(key==='stockMovements'&&raw[key]===undefined) continue;
+    if((key==='stockMovements'||key==='valuationChanges')&&raw[key]===undefined) continue;
     ensure(Array.isArray(raw[key])&&raw[key].length<=150000,'قائمة '+key+' غير صحيحة');
     (state[key] as any[])=structuredClone(raw[key]);
   }
@@ -42,6 +43,7 @@ export function validateState(value:unknown):State{
   const containers=new Map(state.containers.map(c=>[c.id,c])),items=new Map(state.items.map(i=>[i.id,i])),customers=new Set(state.customers.map(c=>c.id)),variants=new Set<string>(),sold=new Map<string,number>();
   for(const c of state.containers){for(const key of ['code','name','supplier','eta','notes','createdAt','receivedAt'] as const)str(c[key],'الحاوية / '+key,key==='code'||key==='name');currency(c,'الحاوية');ensure(['draft','transit','received','final'].includes(c.status),'حالة الحاوية غير معروفة');if(c.eta)isoDate(c.eta,'الوصول المتوقع');if(['received','final'].includes(c.status))isoDate(c.receivedAt.slice(0,10),'تاريخ الاستلام');}
   for(const container of state.containers) {
+    if(container.shareCosts!==undefined) ensure(!container.parentId&&typeof container.shareCosts==='boolean','إعداد مشاركة المصاريف غير صحيح');
     if(container.parentId!==undefined) {
       str(container.parentId,'مرجع الحاوية الأصلية',true);
       const parent=containers.get(container.parentId);
@@ -99,6 +101,55 @@ export function validateState(value:unknown):State{
   }
   for(const e of state.costs){ensure(containers.has(e.containerId),'مصروف مرتبط بحاوية مفقودة');str(e.name,'اسم المصروف',true);str(e.notes,'ملاحظات المصروف');str(e.target,'هدف المصروف');numeric(e.amount,'مبلغ المصروف');currency(e,'المصروف');ensure(Number.isSafeInteger(cents(e.amount*e.fx)),'قيمة مصروف أكبر من المسموح');ensure(['value','quantity','volume','weight','direct'].includes(e.basis),'طريقة توزيع غير معروفة');ensure(typeof e.confirmed==='boolean','حالة المصروف غير صحيحة');if(e.basis==='direct')ensure(items.get(e.target)?.containerId===e.containerId,'مصروف مباشر مرتبط بصنف مفقود');}
   const costs=new Map(state.costs.map(cost=>[cost.id,cost]));
+  for(const cost of state.costs) {
+    if(cost.scope!==undefined) ensure(cost.scope==='family'||cost.scope==='container','نطاق مصروف غير معروف');
+    if(cost.basis==='direct'&&cost.scope!==undefined) ensure(cost.scope==='container','مصروف مباشر بنطاق مشترك');
+  }
+  const receipts=new Map<string,number>();
+  const receiptDates=new Map<string,string>();
+  const sharing=new Map<string,boolean>();
+  const purchaseAdjustments=new Map<string,number>();
+  for(const change of state.valuationChanges) {
+    const container=containers.get(change.containerId);
+    ensure(container,'سند تصحيح مرتبط بحاوية مفقودة');
+    isoDate(change.date,'تاريخ سند التصحيح');
+    str(change.createdAt,'وقت سند التصحيح',true);
+    str(change.reason,'سبب سند التصحيح',true);
+    const effect=obj(change.effect,'أثر سند التصحيح');
+    for(const key of ['stockValue','salesCost','stockLoss']) numeric(effect[key],'أثر التصحيح / '+key,-Number.MAX_SAFE_INTEGER,true);
+    if(change.kind==='sharing') {
+      ensure(!container.parentId&&typeof change.before==='boolean'&&typeof change.after==='boolean','سند مشاركة مصاريف غير صحيح');
+      ensure(!sharing.has(container.id)||sharing.get(container.id)===change.before,'تسلسل مشاركة المصاريف غير متسق');
+      sharing.set(container.id,change.after);
+      ensure(Array.isArray(change.scopes),'نطاقات مصاريف السند مفقودة');
+      const scopeIds=new Set<string>();
+      for(const row of change.scopes) {
+        obj(row,'نطاق مصروف');str(row.costId,'مرجع نطاق المصروف',true);
+        ensure(!scopeIds.has(row.costId)&&['family','container'].includes(row.before)&&['family','container'].includes(row.after),'نطاق مصروف مكرر أو غير صحيح');
+        scopeIds.add(row.costId);
+      }
+    } else {
+      ensure(change.kind==='receipt','نوع سند تصحيح غير معروف');
+      const item=items.get(change.itemId);
+      ensure(item&&!item.gradeOf&&item.containerId===container.id&&isReceived(container),'تصحيح كمية مرتبط بصنف غير صحيح');
+      ensure(change.date>=container.receivedAt.slice(0,10),'تصحيح كمية مؤرخ قبل الاستلام');
+      for(const key of ['before','after','count','purchaseAmount'] as const) numeric(change[key],'تصحيح الكمية / '+key,0,true);
+      ensure(change.before!==change.after&&change.before<=1e7&&change.after<=1e7,'كميات تصحيح غير صحيحة');
+      ensure(change.mode==='received'||change.mode==='stock','نوع جرد غير صحيح');
+      ensure(change.mode==='received'?change.count===change.after:change.after>=change.count&&change.before-change.after+change.count>=0,'الرصيد الفعلي لا يطابق التصحيح');
+      ensure(change.purchaseAmount===0||change.after>change.before,'قيمة شراء إضافية بدون زيادة كمية');
+      ensure(!receipts.has(item.id)||receipts.get(item.id)===change.before,'تسلسل تصحيح الكمية غير متسق');
+      ensure(change.date>=(receiptDates.get(item.id)??''),'تاريخ تصحيح كمية غير متسلسل');
+      receipts.set(item.id,change.after);receiptDates.set(item.id,change.date);
+      purchaseAdjustments.set(item.id,(purchaseAdjustments.get(item.id)??0)+change.purchaseAmount);
+    }
+  }
+  for(const [id,count] of receipts) ensure(items.get(id)!.received===count,'رصيد الاستلام لا يطابق آخر تصحيح');
+  for(const [id,enabled] of sharing) ensure(!!containers.get(id)!.shareCosts===enabled,'حالة المشاركة لا تطابق آخر سند');
+  for(const [id,amount] of purchaseAdjustments) {
+    const item=items.get(id)!;
+    ensure(Number.isSafeInteger(cents(item.quantity*item.purchase*item.fx)+amount),'قيمة شراء مصححة أكبر من المسموح');
+  }
   const sharedSources=new Set<string>();
   for(const share of state.costs) {
     if(share.sourceCostId===undefined) continue;

@@ -50,6 +50,18 @@
 }
 
 .modal-invoiceTemplate{width:850px}
+.modal-sharing,.modal-receiptCorrection{width:980px}
+.sharing-control{display:flex;align-items:center;justify-content:space-between;gap:16px;padding:18px 20px;flex-wrap:wrap}
+.sharing-control p{margin:7px 0 0;font-size:12px;color:#718268}
+.valuation-editor{display:grid;gap:18px;min-width:0}
+.valuation-editor>.form-grid{margin:0}
+.valuation-editor .table-wrap{margin:0}
+.valuation-editor select{max-width:100%;min-height:42px;border:1px solid #dce3d6;border-radius:7px;padding:8px;background:#fff;color:inherit}
+.valuation-preview{border:1px solid #dce8cf;border-radius:9px;padding:16px;min-width:0;background:#f7faf2}
+.valuation-preview h3{margin:0 0 12px;font-size:14px}
+.valuation-preview .breakdown{margin-bottom:16px}
+.receipt-correction-links{display:flex;flex-wrap:wrap;gap:8px;margin-bottom:14px}
+@media(max-width:760px){.sharing-control{padding:15px}.sharing-control>.button{width:100%}.valuation-preview{padding:12px}}
 .invoice-template-picker{display:grid;gap:14px;min-width:0}
 .invoice-template-picker>.search-box{width:100%;min-width:0}
 .invoice-template-picker>.button{justify-self:start}

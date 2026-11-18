@@ -1,5 +1,5 @@
 const PREFIX='tajer-pages-'+encodeURIComponent(new URL('./',self.location.href).pathname)+'-';
-const CACHE=PREFIX+'bad21597d56d';
+const CACHE=PREFIX+'85cb90e97139';
 const ROOT=new URL('./',self.location.href).href;
 const SHELL=new URL('index.html',ROOT).href;
 const FILES=['index.html','favicon.svg','manifest.webmanifest','icon-192.png','icon-512.png'].map(p=>new URL(p,ROOT).href);

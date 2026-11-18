@@ -5,6 +5,7 @@ export type Container = {
   eta:string;notes:string;status:ContainerStatus;createdAt:string;receivedAt:string;
   parentId?:string;annexKind?:'addition'|'correction';documentDate?:string;
   correctionEffect?:{salesCost:number;stockLoss:number};
+  shareCosts?:boolean;
 };
 export type Item = {
   id:string;containerId:string;model:string;name:string;color:string;size:string;
@@ -16,6 +17,7 @@ export type Cost = {
   id:string;containerId:string;name:string;amount:number;currency:Currency;fx:number;
   basis:'value'|'quantity'|'volume'|'weight'|'direct';target:string;confirmed:boolean;notes:string;
   sourceCostId?:string;activateOnReceipt?:boolean;
+  scope?:'family'|'container';
 };
 export type Customer = {id:string;name:string;phone:string;address:string;notes:string;opening:number};
 export type Allocation = {itemId:string;quantity:number;extraUnitCost?:number};
@@ -32,7 +34,13 @@ export type StockMovement = {
   date:string;reason:string;createdAt:string;extraUnitCost:number;
   amount?:number;netUnitValue?:number;outputItemId?:string;pricing?:RecoveryPricing;
 };
-export type State = {revision:number;settings:Settings;containers:Container[];items:Item[];costs:Cost[];customers:Customer[];sales:Sale[];payments:Payment[];operatingExpenses:OperatingExpense[];stockMovements:StockMovement[]};
+export type ValuationEffect = {stockValue:number;salesCost:number;stockLoss:number};
+type ValuationDocument = {id:string;containerId:string;date:string;createdAt:string;reason:string;effect:ValuationEffect};
+export type ValuationChange = ValuationDocument & (
+  {kind:'sharing';before:boolean;after:boolean;scopes:{costId:string;before:NonNullable<Cost['scope']>;after:NonNullable<Cost['scope']>}[]}
+  |{kind:'receipt';itemId:string;before:number;after:number;mode:'received'|'stock';count:number;purchaseAmount:number}
+);
+export type State = {revision:number;settings:Settings;containers:Container[];items:Item[];costs:Cost[];customers:Customer[];sales:Sale[];payments:Payment[];operatingExpenses:OperatingExpense[];stockMovements:StockMovement[];valuationChanges:ValuationChange[]};
 export type Action = {type:string;payload:Record<string,any>};
 export const recordKinds = ['containers','items','costs','customers','sales','payments','operatingExpenses'] as const;
 const unitCostCache=new WeakMap<State,Map<string,number>>();
@@ -41,9 +49,10 @@ export const currencies:Currency[]=['ILS','USD','CNY','JOD','EUR'];
 export const statusLabels:Record<ContainerStatus,string>={draft:'قيد التجهيز',transit:'في الطريق',received:'مستلمة · تكلفة تقديرية',final:'مستلمة · تكلفة معتمدة'};
 export const paymentLabels:Record<string,string>={cash:'نقدي',bank:'تحويل بنكي',card:'بطاقة',credit:'آجل'};
 export const basisLabels:Record<Cost['basis'],string>={value:'قيمة الشراء',quantity:'عدد القطع',volume:'الحجم CBM',weight:'الوزن',direct:'موديل محدد'};
-export function emptyState():State{return {revision:0,settings:{name:'تاجر',phone:'',address:'',margin:30,invoiceFooter:'شكرًا لتعاملكم معنا'},containers:[],items:[],costs:[],customers:[],sales:[],payments:[],operatingExpenses:[],stockMovements:[]};}
+export function emptyState():State{return {revision:0,settings:{name:'تاجر',phone:'',address:'',margin:30,invoiceFooter:'شكرًا لتعاملكم معنا'},containers:[],items:[],costs:[],customers:[],sales:[],payments:[],operatingExpenses:[],stockMovements:[],valuationChanges:[]};}
 export function upgradeState(state:State):State {
-  return state.stockMovements===undefined ? {...state,stockMovements:[]} : state;
+  if(state.stockMovements!==undefined&&state.valuationChanges!==undefined) return state;
+  return {...state,stockMovements:state.stockMovements??[],valuationChanges:state.valuationChanges??[]};
 }
 export function today(){return new Intl.DateTimeFormat('en-CA',{timeZone:'Asia/Hebron',year:'numeric',month:'2-digit',day:'2-digit'}).format(new Date());}
 export function uid(){if(typeof crypto.randomUUID==='function')return crypto.randomUUID();const b=crypto.getRandomValues(new Uint8Array(16));b[6]=(b[6]&15)|64;b[8]=(b[8]&63)|128;const h=Array.from(b,v=>v.toString(16).padStart(2,'0')).join('');return h.slice(0,8)+'-'+h.slice(8,12)+'-'+h.slice(12,16)+'-'+h.slice(16,20)+'-'+h.slice(20);}
@@ -82,6 +91,26 @@ export function containerAnnexes(state:State,containerId:string) {
   return state.containers.filter(container=>container.parentId===containerId);
 }
 
+export function containerRoot(state:State,containerId:string) {
+  const container=getContainer(state,containerId);
+  return container.parentId?getContainer(state,container.parentId):container;
+}
+
+export function familyCosts(state:State,containerId:string) {
+  const root=containerRoot(state,containerId);
+  const ids=new Set([root.id,...containerAnnexes(state,root.id).map(container=>container.id)]);
+  return state.costs.filter(cost=>ids.has(cost.containerId)&&!cost.sourceCostId);
+}
+
+export function costScope(cost:Cost) {
+  return cost.basis==='direct'?'container':cost.scope??'family';
+}
+
+function provisionalCost(state:State,containerId:string) {
+  const container=getContainer(state,containerId),root=containerRoot(state,containerId);
+  return container.status!=='final'||!!root.shareCosts&&[root,...containerAnnexes(state,root.id)].some(batch=>batch.status!=='final');
+}
+
 export function isReceived(container:Container|undefined) {
   return container?.status==='received'||container?.status==='final';
 }
@@ -108,6 +137,7 @@ type Valuation={
   issues:Map<string,string[]>;
   unallocated:Map<string,number>;
   costs:Map<string,number>;
+  allocations:Map<string,Map<string,number>>;
 };
 const valuationCache=new WeakMap<State,Valuation>();
 
@@ -118,24 +148,45 @@ function landedValuation(state:State):Valuation {
   const issues=new Map<string,string[]>();
   const unallocated=new Map<string,number>();
   const costs=new Map(state.costs.map(cost=>[cost.id,cents(cost.amount*cost.fx)]));
+  const allocations=new Map<string,Map<string,number>>();
   const containers=new Map(state.containers.map(container=>[container.id,container]));
   const itemsByContainer=new Map<string,Item[]>();
   const recoveries=new Map<string,Item[]>();
+  const purchaseAdjustments=new Map<string,number>();
+  for(const change of state.valuationChanges??[]) {
+    if(change.kind==='receipt') purchaseAdjustments.set(change.itemId,(purchaseAdjustments.get(change.itemId)??0)+change.purchaseAmount);
+  }
 
   for(const item of state.items) {
     if(item.gradeOf) continue;
     const rows=itemsByContainer.get(item.containerId)??[];
     rows.push(item);
     itemsByContainer.set(item.containerId,rows);
-    amounts.set(item.id,{base:cents(item.quantity*item.purchase*item.fx),allocated:0});
+    const adjustment=purchaseAdjustments.get(item.id)??0;
+    amounts.set(item.id,{base:cents(item.quantity*item.purchase*item.fx)+adjustment,allocated:0});
     if(item.recoveryOf&&item.received&&isReceived(containers.get(item.containerId))) {
       const recovered=recoveries.get(item.recoveryOf)??[];
       recovered.push(item);
       recoveries.set(item.recoveryOf,recovered);
     }
   }
+  // Transfer the existing purchase value before allocating shared family expenses.
+  for(const [originalId,recovered] of recoveries) {
+    const original=state.items.find(item=>item.id===originalId)!;
+    if(!containerRoot(state,original.containerId).shareCosts) continue;
+    const originalAmounts=amounts.get(originalId)!;
+    const recoveredCount=recovered.reduce((sum,item)=>sum+item.received,0);
+    const weights=[original.received||Math.max(0,original.quantity-recoveredCount),...recovered.map(item=>item.received)];
+    const bases=split(originalAmounts.base,weights);
+    originalAmounts.base=bases[0];
+    recovered.forEach((item,index)=>amounts.get(item.id)!.base+=bases[index+1]);
+  }
   for(const cost of state.costs) {
     if(!cost.sourceCostId) continue;
+    if(containerRoot(state,cost.containerId).shareCosts) {
+      costs.set(cost.id,0);
+      continue;
+    }
     if(cost.activateOnReceipt&&!isReceived(containers.get(cost.containerId))) {
       costs.set(cost.id,0);
       continue;
@@ -145,30 +196,50 @@ function landedValuation(state:State):Valuation {
   for(const cost of state.costs) {
     const amount=costs.get(cost.id)??0;
     if(!amount) continue;
-    const items=itemsByContainer.get(cost.containerId)??[];
+    const root=containerRoot(state,cost.containerId);
+    const shared=root.shareCosts&&costScope(cost)==='family';
+    const targets=shared?[root,...containerAnnexes(state,root.id)]:[containers.get(cost.containerId)!];
+    const quantityWeight=(item:Item)=>{
+      const recovered=(recoveries.get(item.id)??[]).reduce((sum,row)=>sum+row.received,0);
+      return item.recoveryOf&&isReceived(containers.get(item.containerId))?item.received
+        :Math.max(item.quantity,item.received+item.damaged+recovered)-recovered;
+    };
+    const items=targets.flatMap(container=>itemsByContainer.get(container.id)??[]).filter(item=>
+      !shared||((!item.recoveryOf||isReceived(containers.get(item.containerId)))&&quantityWeight(item)>0));
     const weights=items.map(item=>{
-      if(cost.basis==='quantity') return item.quantity;
-      if(cost.basis==='volume') return item.volume;
-      if(cost.basis==='weight') return item.weight;
+      if(cost.basis==='quantity') return shared?quantityWeight(item):item.quantity;
+      if(cost.basis==='volume'||cost.basis==='weight') {
+        const measure=cost.basis;
+        if(!shared) return item[measure];
+        if(item.recoveryOf) return item[measure]*item.received/item.quantity;
+        const transferred=(recoveries.get(item.id)??[]).reduce((sum,row)=>sum+row[measure]*row.received/row.quantity,0);
+        return Math.max(0,item[measure]-transferred);
+      }
       if(cost.basis==='direct') return item.id===cost.target?1:0;
       return amounts.get(item.id)!.base;
     });
     const missingMeasure=(cost.basis==='volume'||cost.basis==='weight')&&weights.some(weight=>weight<=0);
     if(amount<0||missingMeasure||weights.reduce((sum,weight)=>sum+weight,0)<=0) {
-      const messages=issues.get(cost.containerId)??[];
-      messages.push(missingMeasure
+      const message=missingMeasure
         ? 'أكمل '+(cost.basis==='volume'?'الحجم':'الوزن')+' لكل صنف لتوزيع «'+cost.name+'».'
-        : 'راجع مبلغ وأساس توزيع «'+cost.name+'».');
-      issues.set(cost.containerId,messages);
+        : 'راجع مبلغ وأساس توزيع «'+cost.name+'».';
+      for(const target of targets) issues.set(target.id,[...(issues.get(target.id)??[]),message]);
       unallocated.set(cost.containerId,(unallocated.get(cost.containerId)??0)+amount);
       continue;
     }
-    split(amount,weights).forEach((share,index)=>amounts.get(items[index].id)!.allocated+=share);
+    const byContainer=new Map<string,number>();
+    split(amount,weights).forEach((share,index)=>{
+      const item=items[index];
+      amounts.get(item.id)!.allocated+=share;
+      byContainer.set(item.containerId,(byContainer.get(item.containerId)??0)+share);
+    });
+    allocations.set(cost.id,byContainer);
   }
   for(const original of state.items) {
     const recovered=recoveries.get(original.id);
     const originalAmounts=amounts.get(original.id);
     if(!recovered||!originalAmounts) continue;
+    if(containerRoot(state,original.containerId).shareCosts) continue;
     const recoveredCount=recovered.reduce((sum,item)=>sum+item.received,0);
     const originalWeight=original.received||Math.max(0,original.quantity-recoveredCount);
     const weights=[originalWeight,...recovered.map(item=>item.received)];
@@ -182,13 +253,14 @@ function landedValuation(state:State):Valuation {
       destination.allocated+=allocations[index+1];
     });
   }
-  const result={items:amounts,issues,unallocated,costs};
+  const result={items:amounts,issues,unallocated,costs,allocations};
   valuationCache.set(state,result);
   return result;
 }
 
-export function costAllocatedToBatch(state:State,cost:Cost) {
-  return landedValuation(state).costs.get(cost.id)??0;
+export function costAllocatedToBatch(state:State,cost:Cost,containerId=cost.containerId) {
+  const valuation=landedValuation(state);
+  return valuation.allocations.get(cost.id)?.get(containerId)??0;
 }
 
 export function calculateContainer(state:State,id:string) {
@@ -210,7 +282,7 @@ export function calculateContainer(state:State,id:string) {
   const loss=received?rows.filter(row=>row.count===0).reduce((sum,row)=>sum+row.total,0):0;
   return {container,rows,base,extra,total,revenue,profit:revenue-total,
     quantity:rows.reduce((sum,row)=>sum+row.count,0),issues,valid:issues.length===0,
-    provisional:container.status!=='final',loss};
+    provisional:provisionalCost(state,id),loss};
 }
 
 export function calculateContainerFamily(state:State,containerId:string) {
@@ -321,12 +393,19 @@ export function stockJournal(state:State,key:string) {
     const container=getContainer(state,item.containerId);
     if(!isReceived(container)) continue;
     const batch=container.code;
+    const corrections=(state.valuationChanges??[]).filter((change):change is Extract<ValuationChange,{kind:'receipt'}>=>change.kind==='receipt'&&change.itemId===item.id);
+    const initialReceived=item.received-corrections.reduce((sum,change)=>sum+change.after-change.before,0);
     const receipt:StockJournalRow={
       id:item.id,itemId:item.id,batch,date:itemReceiptDate(state,item),createdAt:container.createdAt,
       label:item.gradeOf?'إضافة إلى الدرجة الثانية':container.annexKind==='correction'?'تصحيح استلام':container.parentId?'استلام ملحق':'استلام',
-      change:item.received,balance:item.received,amount:item.received*baseItemCost(state,item.id),note:container.name,
+      change:initialReceived,balance:initialReceived,amount:initialReceived*baseItemCost(state,item.id),note:container.name,
     };
     const entries:StockJournalRow[]=[];
+    for(const change of corrections) {
+      const quantity=change.after-change.before;
+      entries.push({id:change.id,itemId:item.id,batch,date:change.date,createdAt:change.createdAt,
+        label:'تصحيح كمية الاستلام',change:quantity,balance:0,amount:quantity*baseItemCost(state,item.id),note:change.reason});
+    }
     for(const sale of state.sales) {
       if(sale.voided) continue;
       const allocations=sale.lines.flatMap(line=>line.allocations).filter(allocation=>allocation.itemId===item.id);
@@ -344,7 +423,7 @@ export function stockJournal(state:State,key:string) {
         amount:movement.kind==='cost'?movement.amount??0:movementLoss(state,movement),note:movement.reason,movement});
     }
     entries.sort((a,b)=>a.date.localeCompare(b.date)||a.createdAt.localeCompare(b.createdAt));
-    let balance=item.received;
+    let balance=initialReceived;
     for(const row of entries) {
       balance+=row.change;
       row.balance=balance;
@@ -359,6 +438,7 @@ export function createdEntityId(before:State,after:State,type:string){
     :type==='container.save'||type==='container.annex'?'containers'
     :type==='customer.save'?'customers'
     :type==='stock.record'?'stockMovements':undefined;
+  if(type==='container.sharing'||type==='receipt.correct') return after.valuationChanges.at(-1)?.id;
   if(!kind)return undefined;
   const ids=new Set((before[kind]??[]).map(record=>record.id));
   return after[kind].find(record=>!ids.has(record.id))?.id;
@@ -388,7 +468,7 @@ export function inventory(state:State) {
       groups.set(key,group);
     }
     group.quantity+=count;
-    group.provisional ||= container!.status!=='final';
+    group.provisional ||= provisionalCost(state,container!.id);
     group.batches.push({item,quantity:count,cost});
   }
   return [...groups.values()].sort((a,b)=>a.item.model.localeCompare(b.item.model,'ar'));
@@ -419,7 +499,10 @@ export function report(state:State,from='',to='') {
   const losses=(state.stockMovements??[]).filter(movement=>movement.kind!=='cost'&&inRange(movement.date));
   const adjustmentLoss=losses.reduce((sum,movement)=>sum+movementLoss(state,movement),0);
   const loss=receiptLoss+adjustmentLoss;
-  const isProvisional=(id:string)=>state.containers.find(container=>container.id===state.items.find(item=>item.id===id)?.containerId)?.status!=='final';
+  const isProvisional=(id:string)=>{
+    const item=state.items.find(item=>item.id===id);
+    return !item||provisionalCost(state,item.containerId);
+  };
   const provisional=sales.some(sale=>sale.lines.some(line=>line.allocations.some(allocation=>isProvisional(allocation.itemId))))
     ||losses.some(movement=>isProvisional(movement.itemId));
   return {sales,revenue,cost,gross:revenue-cost,delivery,expenses,loss,receiptLoss,adjustmentLoss,
@@ -505,6 +588,9 @@ function saveProductDetails(state:State,payload:Action['payload']) {
 }
 
 function allocateSharedCost(state:State,payload:Action['payload']) {
+  if(containerRoot(state,text(payload.containerId)).shareCosts) {
+    throw Error('مشاركة مصاريف الحاويات مفعلة. حدّد نطاق المصروف من إعدادات المشاركة.');
+  }
   const annex=getContainer(state,payload.containerId);
   editable(annex);
   const parent=getContainer(state,annex.parentId);
@@ -711,6 +797,87 @@ function approveRecoveryPrice(state:State,payload:Action['payload'],now:string) 
   movement.pricing={...pricing,approvedAt:now};
 }
 
+export function valuationEffect(before:State,after:State):ValuationEffect {
+  const stockValue=(state:State)=>inventory(state).reduce((sum,group)=>
+    sum+group.batches.reduce((value,batch)=>value+batch.quantity*batch.cost,0),0);
+  const prior=report(before),next=report(after);
+  return {stockValue:Math.round(stockValue(after)-stockValue(before)),
+    salesCost:Math.round(next.cost-prior.cost),stockLoss:Math.round(next.loss-prior.loss)};
+}
+
+function changeDocument(state:State,containerId:string,payload:Action['payload'],now:string):ValuationDocument {
+  const container=getContainer(state,containerId);
+  const documentDate=date(payload.date||today());
+  if(documentDate>today()||(isReceived(container)&&documentDate<container.receivedAt.slice(0,10))) {
+    throw Error('اختر تاريخًا بين الاستلام واليوم.');
+  }
+  const reason=text(payload.reason,3000);
+  if(!reason) throw Error('اكتب سبب التصحيح أو مرجع المستند.');
+  return {id:uid(),containerId,date:documentDate,createdAt:now,reason,
+    effect:{stockValue:0,salesCost:0,stockLoss:0}};
+}
+
+function changeCostSharing(state:State,payload:Action['payload'],now:string) {
+  const root=getContainer(state,payload.id);
+  if(root.parentId) throw Error('غيّر مشاركة المصاريف من الحاوية الأصلية.');
+  if(typeof payload.enabled!=='boolean') throw Error('حدّد حالة مشاركة المصاريف.');
+  const costs=familyCosts(state,root.id);
+  if(!Array.isArray(payload.scopes)||payload.scopes.length!==costs.length) {
+    throw Error('راجع نطاق جميع مصاريف المجموعة.');
+  }
+  const selected=new Map<string,Cost['scope']>();
+  for(const row of payload.scopes) {
+    if(!costs.some(cost=>cost.id===row.costId)||selected.has(row.costId)
+      ||!['family','container'].includes(row.scope)) throw Error('نطاق مصروف غير صحيح أو مكرر.');
+    selected.set(row.costId,row.scope);
+  }
+  const scopes=costs.map(cost=>({costId:cost.id,before:costScope(cost),
+    after:cost.basis==='direct'?'container' as const:selected.get(cost.id)!}));
+  const before=!!root.shareCosts;
+  if(before===payload.enabled&&scopes.every(row=>row.before===row.after)) {
+    throw Error('غيّر حالة المشاركة أو نطاق أحد المصاريف لمعاينة الأثر.');
+  }
+  const document=changeDocument(state,root.id,payload,now);
+  root.shareCosts=payload.enabled;
+  for(const cost of costs) cost.scope=scopes.find(row=>row.costId===cost.id)!.after;
+  state.valuationChanges.push({...document,kind:'sharing',before,after:payload.enabled,scopes});
+}
+
+function correctReceipt(state:State,payload:Action['payload'],now:string) {
+  const item=getItem(state,payload.itemId);
+  if(item.gradeOf||!isReceived(getContainer(state,item.containerId))) {
+    throw Error('اختر صنفًا أصليًا من دفعة مستلمة لتصحيح الكمية.');
+  }
+  const mode=payload.mode??'received';
+  if(mode!=='received'&&mode!=='stock') throw Error('اختر إجمالي الاستلام أو الرصيد الفعلي.');
+  const count=integer(payload.count);
+  const before=item.received;
+  const consumed=soldOf(state,item.id)+adjustedOut(state,item.id);
+  const after=mode==='stock'?count+consumed:count;
+  if(after===before) throw Error('الكمية مطابقة للرصيد المسجل.');
+  if(after<consumed) throw Error('الكمية المصححة أقل من المبيعات والتسويات المسجلة على الدفعة.');
+  if(after>1e7) throw Error('الكمية المصححة أكبر من المسموح.');
+  const recovered=state.items.filter(row=>row.recoveryOf===item.id).reduce((sum,row)=>{
+    const container=getContainer(state,row.containerId);
+    return sum+(isReceived(container)?row.received+row.damaged:row.quantity);
+  },0);
+  if(recovered>Math.max(0,item.quantity-after-item.damaged)
+    ||(item.recoveryOf&&after+item.damaged>item.quantity)) {
+    throw Error('الكمية تتعارض مع كمية مصححة في ملحق الجرد. راجع سند الملحق أولًا.');
+  }
+  if(after===consumed&&additionalStockValue(state,item.id)>0.01) {
+    throw Error('توجد مصاريف محملة على الرصيد المتبقي. راجع تسويتها قبل تصفير الرصيد.');
+  }
+  const purchaseAmount=Math.round(num(payload.purchaseAmount??0,0,1e12));
+  if(purchaseAmount>0&&after<before) throw Error('قيمة الشراء الإضافية تتطلب زيادة في الكمية.');
+  const document=changeDocument(state,item.containerId,payload,now);
+  const latest=state.valuationChanges.filter(change=>change.kind==='receipt'&&change.itemId===item.id)
+    .reduce((last,change)=>change.date>last?change.date:last,'');
+  if(document.date<latest) throw Error('تاريخ التصحيح يسبق آخر تصحيح مسجل للصنف.');
+  item.received=after;
+  state.valuationChanges.push({...document,kind:'receipt',itemId:item.id,before,after,mode,count,purchaseAmount});
+}
+
 export function perform(previous:State,action:Action):State{
   const s:State=upgradeState(structuredClone(previous)),p=action.payload??{},now=new Date().toISOString();
   switch(action.type){
@@ -737,6 +904,7 @@ export function perform(previous:State,action:Action):State{
       break;
     }
     case 'container.annex':createAnnex(s,p,now);break;
+    case 'container.sharing':changeCostSharing(s,p,now);break;
     case 'container.transit':{const c=getContainer(s,p.id);if(!['draft','transit'].includes(c.status))throw Error('الحاوية مستلمة بالفعل.');c.status='transit';break;}
     case 'container.delete': {
       const container=getContainer(s,p.id);
@@ -745,6 +913,7 @@ export function perform(previous:State,action:Action):State{
       s.containers=s.containers.filter(entry=>entry.id!==container.id);
       s.items=s.items.filter(item=>item.containerId!==container.id);
       s.costs=s.costs.filter(cost=>cost.containerId!==container.id);
+      s.valuationChanges=s.valuationChanges.filter(change=>change.containerId!==container.id);
       break;
     }
     case 'items.add': {
@@ -765,6 +934,7 @@ export function perform(previous:State,action:Action):State{
       break;
     }
     case 'receipt.recover':recoverReceiptItem(s,p);break;
+    case 'receipt.correct':correctReceipt(s,p,now);break;
     case 'item.save': {
       const old=getItem(s,p.id);
       const container=getContainer(s,old.containerId);
@@ -793,6 +963,8 @@ export function perform(previous:State,action:Action):State{
       if(old?.sourceCostId) throw Error('هذه حصة من مصروف الحاوية الأصلية. راجع سند تخصيص الحصة.');
       const basis=text(p.basis||'value') as Cost['basis'];
       if(!['value','quantity','volume','weight','direct'].includes(basis)) throw Error('اختر طريقة توزيع صحيحة.');
+      const scope=p.scope??old?.scope??'family';
+      if(!['family','container'].includes(scope)) throw Error('اختر نطاق توزيع المصروف.');
       if(basis==='direct'&&!batchItems(s,container.id).some(item=>item.id===p.target)) {
         throw Error('اختر الصنف الذي يتحمل المصروف.');
       }
@@ -800,6 +972,7 @@ export function perform(previous:State,action:Action):State{
         id:old?.id||uid(),containerId:container.id,name:text(p.name)||'مصروف وصول',
         amount:num(p.amount),currency:cur,fx:rate(cur,p.fx),basis,target:basis==='direct'?text(p.target):'',
         confirmed:p.confirmed===true,notes:text(p.notes,3000),
+        scope:basis==='direct'?'container':scope,
       };
       const shares=s.costs.filter(entry=>entry.sourceCostId===cost.id);
       if(shares.length) {
@@ -894,6 +1067,9 @@ export function perform(previous:State,action:Action):State{
   unitCostCache.delete(s);
   soldQuantityCache.delete(s);
   stockBalanceCache.delete(s);
+  if(action.type==='container.sharing'||action.type==='receipt.correct') {
+    s.valuationChanges.at(-1)!.effect=valuationEffect(previous,s);
+  }
   for(const container of s.containers.filter(isReceived)) {
     const calculation=calculateContainer(s,container.id);
     if(!calculation.valid) throw Error(calculation.issues.join(' '));
