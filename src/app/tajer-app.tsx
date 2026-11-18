@@ -12,11 +12,13 @@ import { showInstallButton, subscribeInstall, installTajer, installationInstruct
 
 import { defaultProductSearch, normalizeSearch, productMatcher, productSearchColumns, type ProductSearchOptions } from '../lib/product-search';
 import { invoiceDraftFromSale, draftQuantities, type InvoiceDraftLine } from '../lib/invoice-draft';
+import {containerRoot,familyCosts,costScope,itemAvailable} from '../lib/domain';
 
+type ValuationModal={kind:'sharing';container:Container}|{kind:'receiptCorrection';item:Item};
 type WarehouseModal={kind:'annex';parent:Container}|{kind:'sharedCost';annex:Container}|{kind:'recoverReceipt';annex:Container}
   |{kind:'details';item:Item}|{kind:'adjust';key:string;movementKind?:'cost'}|{kind:'journal';key:string}|{kind:'recoveryPrice';movement:StockMovement};
 type Page='containers'|'sales'|'inventory'|'reports';
-type Modal={kind:'container';value?:Container}|{kind:'item';value?:Item}|{kind:'cost';value?:Cost}|{kind:'import'}|{kind:'customer';value?:Customer}|{kind:'payment';customerId?:string}|{kind:'expense'}|{kind:'settings'}|{kind:'statement';customer:Customer}|{kind:'sale';sale:Sale}|{kind:'invoiceTemplate'}|{kind:'receive'}|{kind:'finalize'}|{kind:'void';sale:Sale}|{kind:'delete';type:string;id:string;title:string}|{kind:'stockprice';key:string}|{kind:'backup'}|{kind:'install'}|WarehouseModal;
+type Modal={kind:'container';value?:Container}|{kind:'item';value?:Item}|{kind:'cost';value?:Cost}|{kind:'import'}|{kind:'customer';value?:Customer}|{kind:'payment';customerId?:string}|{kind:'expense'}|{kind:'settings'}|{kind:'statement';customer:Customer}|{kind:'sale';sale:Sale}|{kind:'invoiceTemplate'}|{kind:'receive'}|{kind:'finalize'}|{kind:'void';sale:Sale}|{kind:'delete';type:string;id:string;title:string}|{kind:'stockprice';key:string}|{kind:'backup'}|{kind:'install'}|WarehouseModal|ValuationModal;
 type PrintTarget={kind:'container';id:string}|{kind:'sale';id:string}|{kind:'statement';id:string};
 const NAV=[{key:'containers' as Page,label:'الحاويات',sub:'من الشراء إلى الوصول',icon:ContainerIcon},{key:'sales' as Page,label:'بيع سريع',sub:'فواتير ودفعات',icon:ReceiptText},{key:'inventory' as Page,label:'المخزون',sub:'الأصناف المتاحة للبيع',icon:Boxes},{key:'reports' as Page,label:'الحسابات والتقارير',sub:'الربح والذمم',icon:ChartNoAxesCombined}];
 const currencyNames:Record<Currency,string>={ILS:'شيكل ₪',USD:'دولار $',CNY:'يوان ¥',JOD:'دينار',EUR:'يورو €'};
@@ -181,10 +183,11 @@ export default function TajerApp(){
   }
   function containerDetail(){if(!current||!calc)return null;const c=current,v=calc,items=batchItems(state,c.id),costs=state.costs.filter(e=>e.containerId===c.id),editable=!isReceived(c);
     const parent=state.containers.find(entry=>entry.id===c.parentId);
+    const root=containerRoot(state,c.id);
     const annexes=containerAnnexes(state,c.id);
     const family=containerTab==='annexes'?calculateContainerFamily(state,c.id):null;
     const sourceCosts=state.costs.filter(cost=>cost.containerId===parent?.id&&!cost.sourceCostId&&cost.basis!=='direct'&&sharedCostRemaining(state,cost)>0);
-    const canShare=!!parent&&editable&&sourceCosts.length>0&&(parent.status!=='final'||c.annexKind==='correction');
+    const canShare=!root.shareCosts&&!!parent&&editable&&sourceCosts.length>0&&(parent.status!=='final'||c.annexKind==='correction');
     return <><button className="back-link" onClick={()=>parent?openContainer(parent.id,'annexes'):setSelected('')}><ArrowRight size={16}/>{parent?'العودة إلى ملحقات '+parent.code:'جميع الحاويات'}</button><PageHeader eyebrow={c.code+' / '+(c.supplier||'ملف الحاوية')} title={c.name} description={parent?[c.annexKind==='correction'?'تصحيح جرد':'بضاعة ملحقة',c.documentDate,c.eta&&'وصول متوقع '+c.eta].filter(Boolean).join(' · '):c.eta?'الوصول المتوقع '+c.eta:'كشف الحاوية ومصاريفها وأسعارها'} action={<div className="actions"><button className="icon-button" aria-label="تعديل بيانات الحاوية" disabled={disabled} onClick={()=>open({kind:'container',value:c})}><Pencil/></button><button className="button" onClick={exportContainer}><Download/>تصدير</button><button className="icon-button" aria-label="طباعة كشف الحاوية" onClick={()=>print({kind:'container',id:c.id})}><Printer/></button>{parent&&editable&&<button className="icon-button danger-text" aria-label="حذف الملحق" disabled={disabled} onClick={()=>open({kind:'delete',type:'container.delete',id:c.id,title:'حذف الملحق '+c.name})}><Trash2 size={16}/></button>}</div>}/>
       <div className="container-banner"><div><ContainerIcon/><div><strong>{statusLabels[c.status]}</strong><span>{['draft','transit'].includes(c.status)?'الأصناف في الطريق؛ ستدخل المخزون بعد الاستلام.':c.status==='received'?'يمكن البيع من هذه الحاوية؛ ربحها تقديري حتى اعتماد التكلفة.':'تكلفة الوصول معتمدة ومحفوظة لكل دفعة.'}</span></div></div><div className="actions">{c.status==='draft'&&<button className="button light" disabled={disabled} onClick={()=>mutate({type:'container.transit',payload:{id:c.id}}).catch(()=>{})}><Ship/>تحديد «في الطريق»</button>}{c.status==='received'&&<button className="button light" disabled={disabled} onClick={()=>open({kind:'finalize'})}><ShieldCheck/>اعتماد التكلفة النهائية</button>}</div></div>
       <div className="stats-grid"><Stat icon={<Package/>} label={editable?'عدد القطع المتوقع':'القطع السليمة المستلمة'} value={qty(v.quantity)}/><Stat icon={<Calculator/>} label="إجمالي تكلفة الوصول" value={v.valid?money(v.total):'غير مكتملة'} note={'شراء '+money(v.base)+' + مصاريف '+money(v.extra)}/><Stat icon={<ChartNoAxesCombined/>} label="الربح الإجمالي المتوقع" value={v.valid?money(v.profit):'غير مكتمل'} note="عند بيع الكمية بالسعر المقترح"/></div>
@@ -207,17 +210,63 @@ export default function TajerApp(){
         <DataTable headers={['الموديل والصنف','الكمية','شراء القطعة','إجمالي الشراء','تكلفة القطعة واصلة','']} rows={v.rows.map(r=>[<ItemName key={r.item.id} item={r.item}/>,qty(r.item.quantity),<div key="buy">{qty(r.item.purchase)} {currencyNames[r.item.currency]}{r.item.currency!=='ILS'&&<small className="muted block">صرف: {r.item.fx}</small>}</div>,money(r.base),v.valid?money(r.unit):'—',<div className="row-actions" key="actions">{r.item.notes&&<span className="note-marker" title={r.item.notes}><NotebookPen size={16}/></span>}{!r.item.recoveryOf||!editable?<button className="icon-button" aria-label={'تعديل '+r.item.model} disabled={disabled} onClick={()=>open(editable?{kind:'item',value:r.item}:{kind:'details',item:r.item})}><Pencil size={16}/></button>:null}{editable&&<><button className="icon-button danger-text" aria-label={'حذف '+r.item.model} disabled={disabled} onClick={()=>open({kind:'delete',type:'item.delete',id:r.item.id,title:'حذف الصنف '+r.item.model})}><Trash2 size={16}/></button></>}</div>])} empty="أضف الأصناف يدويًا أو استورد كشف Excel / CSV."/>
       </Panel>}
       {containerTab==='costs'&&<>
-        <Panel title="مصاريف الوصول" icon={<Calculator/>} action={c.status!=='final'&&<div className="actions"><button className="button small" disabled={disabled} onClick={()=>mutate({type:'cost.templates',payload:{containerId:c.id}}).catch(()=>{})}>البنود الشائعة</button><button className="button primary small" disabled={disabled} onClick={()=>open({kind:'cost'})}><Plus/>مصروف</button>{canShare&&<button className="button small" disabled={disabled} onClick={()=>open({kind:'sharedCost',annex:c})}>حصة من مصروف الحاوية</button>}</div>}>
-          <DataTable headers={['البند','المبلغ الأصلي','المحمّل على السند','التوزيع حسب','الحالة','']} rows={costs.map(e=>[<div key="name"><strong>{e.name}</strong>{e.notes&&<small className="muted block">{e.notes}</small>}</div>,qty(e.amount)+' '+currencyNames[e.currency],<div key="allocation">{money(costAllocatedToBatch(state,e))}{e.activateOnReceipt&&editable&&<small className="muted block">يُحمّل عند الاستلام</small>}</div>,basisLabels[e.basis]+(e.target?' · '+(items.find(i=>i.id===e.target)?.model||''):''),<Badge key="status" status={e.confirmed?'final':'draft'} label={e.confirmed?'مؤكد':'تقديري'}/>,c.status!=='final'?<div key="actions" className="row-actions">{!e.sourceCostId&&<button className="icon-button" aria-label={'تعديل '+e.name} disabled={disabled} onClick={()=>open({kind:'cost',value:e})}><Pencil size={16}/></button>}<button className="icon-button danger-text" aria-label={'حذف '+e.name} disabled={disabled} onClick={()=>open({kind:'delete',type:'cost.delete',id:e.id,title:'حذف المصروف '+e.name})}><Trash2 size={16}/></button></div>:<ShieldCheck key="locked" size={16} className="muted"/>])} empty="أضف مصاريف الصين والشحن والتخليص والنقل، أو ابدأ بالبنود الشائعة."/>
-        </Panel><Panel title="توزيع المصاريف على الأصناف"><DataTable headers={['الموديل','قيمة الشراء','المصاريف المحملة','إجمالي التكلفة','تكلفة القطعة']} rows={v.rows.map(r=>[<ItemName key={r.item.id} item={r.item}/>,money(r.base),v.valid?money(r.allocated):'—',v.valid?money(r.total):'—',v.valid?money(r.unit):'—'])}/></Panel>
-        <Notice>اختَر طريقة توزيع كل مصروف حسب بياناته. المصروف الخاص بصنف يُحمّل عليه مباشرة. مصاريف التوزيع للزبائن تُسجّل لاحقًا ضمن مصاريف البيع.</Notice>
+        <Panel title="مشاركة مصاريف الحاويات" icon={<Calculator/>}>
+          <div className="sharing-control">
+            <div><strong>{root.shareCosts?'المشاركة مفعلة':'المشاركة غير مفعلة'}</strong>
+              <p>توزيع مصاريف الوصول المشتركة على أصناف الحاوية الأصلية وملحقاتها.</p>
+            </div>
+            <button className="button primary small" disabled={disabled} onClick={()=>open({kind:'sharing',container:root})}>
+              {root.shareCosts?'إعداد المشاركة':'تفعيل المشاركة'}
+            </button>
+          </div>
+          {root.shareCosts&&v.provisional&&<Notice>تكلفة المجموعة تقديرية حتى اعتماد تكاليف الحاوية وملحقاتها.</Notice>}
+        </Panel>
+        <Panel title="مصاريف الوصول" icon={<Calculator/>} action={c.status!=='final'&&<div className="actions">
+          <button className="button small" disabled={disabled} onClick={()=>mutate({type:'cost.templates',payload:{containerId:c.id}}).catch(()=>{})}>البنود الشائعة</button>
+          <button className="button primary small" disabled={disabled} onClick={()=>open({kind:'cost'})}><Plus/>مصروف</button>
+          {canShare&&<button className="button small" disabled={disabled} onClick={()=>open({kind:'sharedCost',annex:c})}>حصة من مصروف الحاوية</button>}
+        </div>}>
+          <DataTable headers={['البند','المبلغ الأصلي','المحمّل على السند','التوزيع حسب','النطاق','الحالة','']} rows={costs.map(cost=>[
+            <div key="name"><strong>{cost.name}</strong>{cost.notes&&<small className="muted block">{cost.notes}</small>}</div>,
+            qty(cost.amount)+' '+currencyNames[cost.currency],
+            <div key="allocation">{money(costAllocatedToBatch(state,cost))}
+              {root.shareCosts&&cost.sourceCostId&&<small className="muted block">مشمولة ضمن توزيع المصروف الأصلي</small>}
+              {cost.activateOnReceipt&&editable&&!root.shareCosts&&<small className="muted block">يُحمّل عند الاستلام</small>}
+            </div>,
+            basisLabels[cost.basis]+(cost.target?' · '+(items.find(item=>item.id===cost.target)?.model||''):''),
+            root.shareCosts&&!cost.sourceCostId&&costScope(cost)==='family'?'مشترك للمجموعة':'خاص بهذا السند',
+            <Badge key="status" status={cost.confirmed?'final':'draft'} label={cost.confirmed?'مؤكد':'تقديري'}/>,
+            c.status!=='final'?<div key="actions" className="row-actions">
+              {!cost.sourceCostId&&<button className="icon-button" aria-label={'تعديل '+cost.name} disabled={disabled} onClick={()=>open({kind:'cost',value:cost})}><Pencil size={16}/></button>}
+              <button className="icon-button danger-text" aria-label={'حذف '+cost.name} disabled={disabled} onClick={()=>open({kind:'delete',type:'cost.delete',id:cost.id,title:'حذف المصروف '+cost.name})}><Trash2 size={16}/></button>
+            </div>:<ShieldCheck key="locked" size={16} className="muted"/>
+          ])} empty="أضف مصاريف الصين والشحن والتخليص والنقل، أو ابدأ بالبنود الشائعة."/>
+        </Panel>
+        {root.shareCosts&&<Panel title="مصاريف المجموعة وحصة هذا السند">
+          <DataTable headers={['السند المصدر','المصروف','القيمة بالشيكل','حصة هذا السند','النطاق']} rows={familyCosts(state,root.id).map(cost=>[
+            state.containers.find(container=>container.id===cost.containerId)?.code||'',cost.name,
+            money(cents(cost.amount*cost.fx)),money(costAllocatedToBatch(state,cost,c.id)),
+            costScope(cost)==='family'?'مشترك للمجموعة':'خاص بهذا السند'
+          ])}/>
+        </Panel>}
+        <Panel title="توزيع المصاريف على الأصناف">
+          <DataTable headers={['السند','الموديل','قيمة الشراء','المصاريف المحملة','إجمالي التكلفة','تكلفة القطعة']} rows={
+            (root.shareCosts&&!parent?calculateContainerFamily(state,c.id).rows:v.rows).map(row=>[
+              state.containers.find(container=>container.id===row.item.containerId)?.code||'',
+              <ItemName key={row.item.id} item={row.item}/>,money(row.base),
+              v.valid?money(row.allocated):'—',v.valid?money(row.total):'—',v.valid?money(row.unit):'—'
+            ])
+          }/>
+        </Panel>
+        <ValuationHistory state={state} containerId={root.id}/>
+        <Notice>اختَر طريقة توزيع كل مصروف حسب بياناته. المصروف الخاص بصنف يُحمّل عليه مباشرة. مصاريف التوزيع للزبائن تُسجّل ضمن مصاريف البيع.</Notice>
       </>}
       {containerTab==='pricing'&&<>
         <Panel title="اقتراح أسعار الجملة" icon={<Tags/>}><div className="pricing-controls"><Field label="هامش مستهدف من سعر البيع %"><input type="number" min="0" max="95" value={margin} onChange={e=>setMargin(e.target.value)}/></Field><Field label="مصاريف بيع متوقعة للقطعة"><MoneyInput value={allowance} onChange={setAllowance}/></Field><button className="button" disabled={disabled||!v.valid||!items.length} onClick={()=>{const m=Number(margin),a=Number(allowance);if(m<0||m>=100||!Number.isFinite(m)||!Number.isFinite(a)||a<0){setError('راجع الهامش والمصاريف المتوقعة.');return;}const draft:Record<string,string>={};v.rows.forEach(r=>draft[r.item.id]=String(Math.ceil((r.unit/100+a)/(1-m/100)*2-1e-9)/2));setPriceDraft(draft);setToast('حُسبت الأسعار المقترحة. راجعها ثم اضغط حفظ الأسعار.');}}><Calculator/>حساب الأسعار</button><button className="button primary" disabled={disabled||!Object.keys(priceDraft).length} onClick={async()=>{try{await mutate({type:'prices.save',payload:{items:Object.entries(priceDraft).map(([id,price])=>({id,price:Number(price)}))}},'تم تحديث أسعار الجملة.');setPriceDraft({});}catch{}}}><Check/>حفظ الأسعار</button></div><p className="hint">السعر = (تكلفة الوصول + مصاريف البيع للقطعة) ÷ (1 − الهامش). التقريب لأعلى نصف شيكل.</p></Panel>
         <Panel title="التكلفة والمبيعات المتوقعة"><DataTable headers={['الموديل','القطع','تكلفة القطعة','سعر البيع المقترح','المبيعات المتوقعة','الربح الإجمالي المتوقع']} rows={v.rows.map(r=>{const price=Number(priceDraft[r.item.id]??r.item.price),revenue=cents(r.count*price);return [<ItemName key={r.item.id} item={r.item}/>,qty(r.count),v.valid?money(r.unit):'—',<div key="price" className="price-cell"><input type="number" min="0" step="0.5" aria-label={'سعر بيع '+r.item.model} value={priceDraft[r.item.id]??r.item.price} onChange={e=>setPriceDraft({...priceDraft,[r.item.id]:e.target.value})}/><span>₪</span></div>,money(revenue),v.valid?<span key="profit" className={revenue-r.total<0?'danger-text':'profit-text'}>{money(revenue-r.total)}</span>:'—'];})}/></Panel><Notice>توقع المبيعات يفترض بيع كامل الكمية بالسعر المقترح. الخصومات والمردودات ومصاريف البيع تؤثر في الربح الفعلي.</Notice>
       </>}
       {containerTab==='receive'&&<Panel title={editable?'الجرد عند الوصول':'تفاصيل الاستلام'} icon={<ClipboardCheck/>} action={editable&&<button className="button primary" disabled={disabled||!items.length} onClick={()=>open({kind:'receive'})}><PackageCheck/>استلام ومطابقة</button>}>
-        {editable?<Empty icon={<PackageCheck/>} title="الكشف جاهز للمطابقة عند الوصول" text="راجع العدد الفعلي والقطع التالفة لكل موديل، ثم اعتمد الاستلام لإضافة البضاعة إلى المخزون." action={<button className="button" disabled={disabled||!items.length} onClick={()=>open({kind:'receive'})}>بدء مطابقة الجرد<ArrowLeft size={16}/></button>}/>:<DataTable headers={['الموديل','المتوقع','السليم المستلم','التالف','فرق العدد']} rows={items.map(i=>[<ItemName key={i.id} item={i}/>,qty(i.quantity),qty(i.received),qty(i.damaged),<span key="diff" className={i.received+i.damaged!==i.quantity?'danger-text':''}>{qty(i.received+i.damaged-i.quantity)}</span>])}/>}
+        {editable?<Empty icon={<PackageCheck/>} title="الكشف جاهز للمطابقة عند الوصول" text="راجع العدد الفعلي والقطع التالفة لكل موديل، ثم اعتمد الاستلام لإضافة البضاعة إلى المخزون." action={<button className="button" disabled={disabled||!items.length} onClick={()=>open({kind:'receive'})}>بدء مطابقة الجرد<ArrowLeft size={16}/></button>}/>:<DataTable headers={['الموديل','المتوقع','السليم المستلم','التالف','فرق العدد','']} rows={items.map(i=>[<ItemName key={i.id} item={i}/>,qty(i.quantity),qty(i.received),qty(i.damaged),<span key="diff" className={i.received+i.damaged!==i.quantity?'danger-text':''}>{qty(i.received+i.damaged-i.quantity)}</span>,<button key="correct" className="button small" disabled={disabled} onClick={()=>open({kind:'receiptCorrection',item:i})}>تصحيح كمية الاستلام</button>])}/>}
       </Panel>}
       {c.notes&&<Panel title={parent?"ملاحظات الملحق":"ملاحظات الحاوية"} icon={<NotebookPen/>}><p className="preserve-lines">{c.notes}</p></Panel>}
     </>;
@@ -408,13 +457,14 @@ export default function TajerApp(){
     if(modal.kind==='statement')return <><CustomerStatement state={state} customer={modal.customer}/><div className="modal-actions"><button className="button" onClick={()=>print({kind:'statement',id:modal.customer.id})}><Printer/>طباعة الكشف</button><button className="button primary" disabled={disabled} onClick={()=>open({kind:'payment',customerId:modal.customer.id})}><HandCoins/>تسجيل دفعة</button></div></>;
     if(modal.kind==='sale'){const sale=state.sales.find(s=>s.id===modal.sale.id)||modal.sale;return <><SaleDetails state={state} sale={sale}/><div className="modal-actions"><button className="button primary" onClick={()=>print({kind:'sale',id:sale.id})}><Printer/>طباعة الفاتورة</button>{!sale.voided&&<button className="button danger-text" disabled={disabled} onClick={()=>open({kind:'void',sale})}>إلغاء فاتورة مسجلة بالخطأ</button>}</div></>;}
     if(modal.kind==='install')return <><p>{installationInstructions()}</p><div className="modal-actions"><button className="button primary" onClick={close}>تم</button></div></>;
+    if(modal.kind==='sharing'||modal.kind==='receiptCorrection')return <ValuationEditor key={modal.kind} modal={modal} state={state} saving={saving} onSave={saveEditor} onCancel={close}/>;
     if(modal.kind==='journal')return <WarehouseJournal state={state} groupKey={modal.key} disabled={disabled} onOpen={open}/>;
     if(modal.kind==='annex'||modal.kind==='sharedCost'||modal.kind==='recoverReceipt'||modal.kind==='details'||modal.kind==='adjust'||modal.kind==='recoveryPrice'){
       return <WarehouseEditor key={modal.kind} modal={modal} state={state} saving={saving} onSave={saveEditor} onCancel={close}/>;
     }
     return <Editor key={modal.kind+('value'in modal?(modal.value?.id||'new'):'')} modal={modal} state={state} current={current} saving={saving} onSave={saveEditor} onCancel={close}/>;
   }
-  const modalTitles:Record<Modal['kind'],string>={container:'ملف الحاوية',item:'بيانات الصنف',cost:'مصروف وصول',import:'استيراد كشف الأصناف',customer:'بيانات الزبون',payment:'سند قبض',expense:'مصروف بيع وتشغيل',settings:'إعدادات المنشأة',statement:'كشف حساب الزبون',sale:'تفاصيل الفاتورة',invoiceTemplate:'اختيار فاتورة سابقة',receive:'الجرد والاستلام',finalize:'اعتماد تكلفة الوصول',void:'إلغاء الفاتورة',delete:'تأكيد الحذف',stockprice:'تعديل سعر البيع',backup:'النسخ الاحتياطية ونقل البيانات',install:'تثبيت تاجر',annex:'إضافة ملحق الحاوية',sharedCost:'حصة من مصروف الحاوية',recoverReceipt:'إضافة كمية من الجرد السابق',details:'تعديل بيانات الصنف',adjust:'تسوية المخزون',journal:'سجل حركة الصنف',recoveryPrice:'تعويض الخسارة في التسعير'};
+  const modalTitles:Record<Modal['kind'],string>={container:'ملف الحاوية',item:'بيانات الصنف',cost:'مصروف وصول',import:'استيراد كشف الأصناف',customer:'بيانات الزبون',payment:'سند قبض',expense:'مصروف بيع وتشغيل',settings:'إعدادات المنشأة',statement:'كشف حساب الزبون',sale:'تفاصيل الفاتورة',invoiceTemplate:'اختيار فاتورة سابقة',receive:'الجرد والاستلام',finalize:'اعتماد تكلفة الوصول',void:'إلغاء الفاتورة',delete:'تأكيد الحذف',stockprice:'تعديل سعر البيع',backup:'النسخ الاحتياطية ونقل البيانات',install:'تثبيت تاجر',annex:'إضافة ملحق الحاوية',sharedCost:'حصة من مصروف الحاوية',recoverReceipt:'إضافة كمية من الجرد السابق',details:'تعديل بيانات الصنف',adjust:'تسوية المخزون',journal:'سجل حركة الصنف',recoveryPrice:'تعويض الخسارة في التسعير',sharing:'مشاركة مصاريف الحاويات',receiptCorrection:'تصحيح كمية الاستلام'};
 
   return <><div className="app-shell">
     <aside className="sidebar"><a className="brand" href="./" onClick={e=>{e.preventDefault();navigate('containers');setSelected('');}}><span className="brand-mark"><ContainerIcon/></span><span><strong>تاجر<span className="brand-dot">.</span></strong><small>الحاويات وبيع الملابس بالجملة</small></span></a><div className="nav-caption">مساحة العمل</div><nav aria-label="القائمة الرئيسية">{NAV.map(n=><button key={n.key} className={'nav-item'+(page===n.key?' active':'')} onClick={()=>navigate(n.key)}><n.icon/><span><strong>{n.label}</strong><small>{n.sub}</small></span>{page===n.key&&<span className="nav-active-dot"/>}</button>)}</nav><div className="sidebar-note"><Ship/><strong>كل قطعة، وحسابها.</strong><p>من كشف الحاوية إلى آخر فاتورة بيع.</p></div><div className="sidebar-bottom"><button className="sidebar-utility" onClick={backup}><Download size={17}/>نسخة احتياطية</button><button className="sidebar-utility" onClick={()=>open({kind:'backup'})}><Upload size={17}/>استعادة ونقل البيانات</button><button className="sidebar-utility" disabled={disabled} onClick={()=>open({kind:'settings'})}><SettingsIcon size={17}/>إعدادات المنشأة</button><div className="account"><span className="avatar">{(state.settings.name||'تاجر').slice(0,1)}</span><span><strong>{state.settings.name}</strong><small>{demo?'مساحة تجريبية':'الحفظ على هذا الجهاز'}</small></span><ShieldCheck size={17}/></div></div></aside>
@@ -553,11 +603,11 @@ function SaleCostPreview({state,line,earlierLines,saleDate,model,onClose}:{
   </div>;
 }
 
-function Editor({modal,state,current,saving,onSave,onCancel}:{modal:Exclude<Modal,WarehouseModal|{kind:'import'|'statement'|'sale'|'invoiceTemplate'|'backup'|'install'}>;state:State;current?:Container;saving:boolean;onSave:(a:Action)=>Promise<void>;onCancel:()=>void}){
+function Editor({modal,state,current,saving,onSave,onCancel}:{modal:Exclude<Modal,WarehouseModal|ValuationModal|{kind:'import'|'statement'|'sale'|'invoiceTemplate'|'backup'|'install'}>;state:State;current?:Container;saving:boolean;onSave:(a:Action)=>Promise<void>;onCancel:()=>void}){
   function initial():Record<string,any>{
     if(modal.kind==='container')return modal.value?{...modal.value}:{name:'',supplier:'',currency:'ILS',fx:1,eta:'',notes:''};
     if(modal.kind==='item')return modal.value?{...modal.value}:{model:'',name:'',color:'',size:'',barcode:'',quantity:'',purchase:'',currency:current?.currency||'ILS',fx:current?.fx||1,volume:'',weight:'',price:'',notes:''};
-    if(modal.kind==='cost')return modal.value?{...modal.value}:{name:'',amount:'',currency:'ILS',fx:1,basis:'value',target:'',confirmed:false,notes:''};
+    if(modal.kind==='cost')return modal.value?{...modal.value}:{name:'',amount:'',currency:'ILS',fx:1,basis:'value',target:'',confirmed:false,notes:'',scope:'family'};
     if(modal.kind==='customer')return modal.value?{...modal.value,opening:modal.value.opening/100}:{name:'',phone:'',address:'',opening:0,notes:''};
     if(modal.kind==='payment')return {customerId:modal.customerId||'',date:today(),amount:'',method:'cash',notes:''};
     if(modal.kind==='expense')return {date:today(),amount:'',category:'توزيع وتوصيل',notes:''};
@@ -596,7 +646,7 @@ function Editor({modal,state,current,saving,onSave,onCancel}:{modal:Exclude<Moda
   return <form onSubmit={submit}>
     {modal.kind==='container'&&<div className="form-grid">{field('اسم الحاوية / الشحنة','name','text',true,{placeholder:'مثال: حاوية الشتاء القادمة'})}{field('المورد / الجهة','supplier')}{currencyField}{field('الوصول المتوقع','eta','date')}<Field label="ملاحظات الحاوية" wide><textarea rows={3} value={form.notes} onChange={e=>set('notes',e.target.value)}/></Field></div>}
     {modal.kind==='item'&&<><div className="form-grid">{field('رقم الموديل','model','text',true,{placeholder:'مثال: BL102'})}{field('اسم الصنف','name','text',true)}{field('عدد القطع','quantity','number',true,{min:1,step:1})}{field('سعر شراء القطعة بعملتها','purchase','number',true,{min:0,step:'.01'})}{currencyField}{field('اللون','color')}{field('المقاس','size')}{field('سعر الجملة المقترح للبيع','price','number',false,{min:0,step:'.01'})}{field('الباركود','barcode')}</div><details className="extra-fields"><summary>الحجم والوزن والملاحظات<ChevronDown size={15}/></summary><div className="form-grid">{field('الحجم الإجمالي لهذا الصنف CBM','volume','number',false,{min:0,step:'.001'})}{field('الوزن الإجمالي لهذا الصنف كغم','weight','number',false,{min:0,step:'.001'})}<Field label="ملاحظات الصنف" wide><textarea rows={2} value={form.notes} onChange={e=>set('notes',e.target.value)}/></Field></div></details><p className="hint">أدخل الحجم أو الوزن عند اختيار أحدهما لتوزيع المصاريف. جميع الكميات بالقطع.</p></>}
-    {modal.kind==='cost'&&<><div className="form-grid">{field('اسم المصروف','name','text',true,{placeholder:'مثال: الشحن البحري'})}{field('المبلغ بعملته الأصلية','amount','number',true,{min:0,step:'.01'})}{currencyField}<Field label="توزيع المصروف حسب"><select value={form.basis} onChange={e=>set('basis',e.target.value)}>{Object.entries(basisLabels).map(([value,label])=><option key={value} value={value}>{label}</option>)}</select></Field>{form.basis==='direct'&&<Field label="الصنف الذي يتحمل المصروف"><select value={form.target} onChange={e=>set('target',e.target.value)} required><option value="">اختر الصنف</option>{(current?batchItems(state,current.id):[]).map(i=><option key={i.id} value={i.id}>{i.model+' · '+i.color+' · '+i.size}</option>)}</select></Field>}<Field label="ملاحظات / مرجع المستند" wide><textarea rows={2} value={form.notes} onChange={e=>set('notes',e.target.value)}/></Field></div><label className="check-row emphasized"><input type="checkbox" checked={form.confirmed} onChange={e=>set('confirmed',e.target.checked)}/><span>المبلغ مؤكد بمستند / دفعة فعلية<small>اتركه غير محدد إذا كان المبلغ تقديريًا قبل الوصول.</small></span></label></>}
+    {modal.kind==='cost'&&<><div className="form-grid">{field('اسم المصروف','name','text',true,{placeholder:'مثال: الشحن البحري'})}{field('المبلغ بعملته الأصلية','amount','number',true,{min:0,step:'.01'})}{currencyField}<Field label="توزيع المصروف حسب"><select value={form.basis} onChange={e=>set('basis',e.target.value)}>{Object.entries(basisLabels).map(([value,label])=><option key={value} value={value}>{label}</option>)}</select></Field><Field label="نطاق التوزيع"><select value={form.basis==='direct'?'container':form.scope??'family'} disabled={form.basis==='direct'} onChange={event=>set('scope',event.target.value)}><option value="family">مشترك للمجموعة عند تفعيل المشاركة</option><option value="container">خاص بهذا السند</option></select></Field>{form.basis==='direct'&&<Field label="الصنف الذي يتحمل المصروف"><select value={form.target} onChange={e=>set('target',e.target.value)} required><option value="">اختر الصنف</option>{(current?batchItems(state,current.id):[]).map(i=><option key={i.id} value={i.id}>{i.model+' · '+i.color+' · '+i.size}</option>)}</select></Field>}<Field label="ملاحظات / مرجع المستند" wide><textarea rows={2} value={form.notes} onChange={e=>set('notes',e.target.value)}/></Field></div><label className="check-row emphasized"><input type="checkbox" checked={form.confirmed} onChange={e=>set('confirmed',e.target.checked)}/><span>المبلغ مؤكد بمستند / دفعة فعلية<small>اتركه غير محدد إذا كان المبلغ تقديريًا قبل الوصول.</small></span></label></>}
     {modal.kind==='customer'&&<div className="form-grid">{field('اسم المحل / الزبون','name','text',true)}{field('رقم الجوال','phone','tel')}{field('العنوان','address')}{field('الرصيد الافتتاحي بالشيكل','opening','number',false,{step:'.01'})}<Field label="ملاحظات التعامل" wide><textarea rows={2} value={form.notes} onChange={e=>set('notes',e.target.value)}/></Field></div>}
     {modal.kind==='payment'&&<><div className="form-grid"><Field label="الزبون"><select value={form.customerId} onChange={e=>set('customerId',e.target.value)} required><option value="">اختر الزبون</option>{state.customers.map(c=><option key={c.id} value={c.id}>{c.name}</option>)}</select></Field>{field('تاريخ الدفعة','date','date',true)}{field('المبلغ بالشيكل','amount','number',true,{min:'.01',step:'.01'})}<Field label="وسيلة القبض"><select value={form.method} onChange={e=>set('method',e.target.value)}>{['cash','bank','card'].map(m=><option key={m} value={m}>{paymentLabels[m]}</option>)}</select></Field><Field label="ملاحظات / مرجع التحويل" wide><textarea rows={2} value={form.notes} onChange={e=>set('notes',e.target.value)}/></Field></div>{form.customerId&&<div className="payment-preview"><span>الرصيد الحالي <strong>{money(customerBalance(state,form.customerId))}</strong></span><ArrowLeft size={17}/><span>بعد الدفعة <strong>{money(customerBalance(state,form.customerId)-cents(Number(form.amount)||0))}</strong></span></div>}</>}
     {modal.kind==='expense'&&<div className="form-grid">{field('التاريخ','date','date',true)}{field('الفئة','category','text',true)}{field('المبلغ بالشيكل','amount','number',true,{min:'.01',step:'.01'})}<Field label="ملاحظات" wide><textarea rows={3} value={form.notes} onChange={e=>set('notes',e.target.value)}/></Field><p className="hint field-wide">هذه مصاريف بيع وتشغيل لاحقة. مصاريف وصول البضاعة تُضاف إلى ملف الحاوية.</p></div>}
@@ -613,7 +663,7 @@ function Editor({modal,state,current,saving,onSave,onCancel}:{modal:Exclude<Moda
   </form>;
 }
 
-function WarehouseJournal({state,groupKey,disabled,onOpen}:{state:State;groupKey:string;disabled:boolean;onOpen:(modal:WarehouseModal)=>void}){
+function WarehouseJournal({state,groupKey,disabled,onOpen}:{state:State;groupKey:string;disabled:boolean;onOpen:(modal:WarehouseModal|ValuationModal)=>void}){
   const group=inventory(state).find(g=>g.key===groupKey);
   if(!group)return null;
   const regular=inventory(state).find(g=>g.key===regularProductKey(group.item));
@@ -623,6 +673,9 @@ function WarehouseJournal({state,groupKey,disabled,onOpen}:{state:State;groupKey
       <strong>{qty(group.quantity)} قطعة متاحة</strong>
       {!group.item.gradeOf&&<button className="button small" disabled={disabled||!group.quantity} onClick={()=>onOpen({kind:'adjust',key:groupKey,movementKind:'cost'})}><Plus size={16}/>تحميل مصروف وصول</button>}
     </div>
+    {!group.item.gradeOf&&<div className="receipt-correction-links">{group.batches.map(batch=><button key={batch.item.id} className="button small" disabled={disabled} onClick={()=>onOpen({kind:'receiptCorrection',item:batch.item})}>
+      <ClipboardCheck size={15}/>تصحيح استلام {state.containers.find(container=>container.id===batch.item.containerId)?.code}
+    </button>)}</div>}
     <DataTable headers={['التاريخ والدفعة','الحركة','تغيّر الكمية','رصيد الدفعة','القيمة','البيان']} rows={stockJournal(state,groupKey).map(row=>{
       const movement=row.movement;
       const canRecover=movement&&movement.kind!=='cost'&&movementLoss(state,movement)>0&&!!regular?.quantity;
@@ -640,6 +693,136 @@ function WarehouseJournal({state,groupKey,disabled,onOpen}:{state:State;groupKey
       ];
     })}/>
   </>;
+}
+
+function ValuationHistory({state,containerId}:{state:State;containerId:string}){
+  const ids=new Set([containerId,...containerAnnexes(state,containerId).map(container=>container.id)]);
+  const changes=state.valuationChanges.filter(change=>ids.has(change.containerId));
+  if(!changes.length)return null;
+  return <Panel title="سجل تصحيح الكميات والمصاريف" icon={<NotebookPen/>}>
+    <DataTable headers={['التاريخ','السند','التعديل','فرق قيمة المخزون','فرق تكلفة المبيعات','فرق الخسائر','السبب']} rows={changes.slice().reverse().map(change=>[
+      change.date,state.containers.find(container=>container.id===change.containerId)?.code||'',
+      change.kind==='receipt'
+        ? <span key="change">{state.items.find(item=>item.id===change.itemId)?.model} · {qty(change.before)} ← {qty(change.after)}</span>
+        : change.after?'تفعيل المشاركة أو تعديل نطاق المصاريف':'إيقاف المشاركة',
+      money(change.effect.stockValue),money(change.effect.salesCost),money(change.effect.stockLoss),change.reason
+    ])}/>
+  </Panel>;
+}
+
+function ValuationPreview({before,after,containerId}:{before:State;after:State;containerId:string}){
+  const change=after.valuationChanges.at(-1)!;
+  const oldRows=new Map(calculateContainerFamily(before,containerId).rows.map(row=>[row.item.id,row]));
+  const rows=calculateContainerFamily(after,containerId).rows.filter(row=>{
+    const old=oldRows.get(row.item.id);
+    return !old||old.count!==row.count||Math.abs(old.unit-row.unit)>0.000001||old.total!==row.total;
+  });
+  return <div className="valuation-preview" aria-label="معاينة أثر التعديل">
+    <h3>أثر التعديل قبل الحفظ</h3>
+    <div className="breakdown">
+      <div><span>التغير في قيمة المخزون المتبقي</span><strong>{money(change.effect.stockValue)}</strong></div>
+      <div><span>التغير في تكلفة المبيعات السابقة</span><strong>{money(change.effect.salesCost)}</strong></div>
+      <div><span>التغير في ربح المبيعات السابقة</span><strong>{money(-change.effect.salesCost)}</strong></div>
+      <div><span>التغير في خسائر المخزون</span><strong>{money(change.effect.stockLoss)}</strong></div>
+    </div>
+    <DataTable headers={['السند','الصنف','الكمية قبل','الكمية بعد','تكلفة القطعة قبل','تكلفة القطعة بعد']} rows={rows.map(row=>{
+      const old=oldRows.get(row.item.id);
+      return [row.batchCode,<ItemName key={row.item.id} item={row.item}/>,qty(old?.count??0),qty(row.count),money(old?.unit??0),money(row.unit)];
+    })} empty="قيم الأصناف متساوية قبل هذا التعديل وبعده."/>
+  </div>;
+}
+
+function ValuationEditor({modal,state,saving,onSave,onCancel}:{
+  modal:ValuationModal;state:State;saving:boolean;onSave:(action:Action)=>Promise<void>;onCancel:()=>void;
+}){
+  const initialItem=modal.kind==='receiptCorrection'?state.items.find(item=>item.id===modal.item.id):undefined;
+  const root=containerRoot(state,modal.kind==='sharing'?modal.container.id:modal.item.containerId);
+  const costs=familyCosts(state,root.id);
+  const [enabled,setEnabled]=useState(true);
+  const [scopes,setScopes]=useState<Record<string,NonNullable<Cost['scope']>>>(()=>Object.fromEntries(costs.map(cost=>[cost.id,costScope(cost)])));
+  const [itemId,setItemId]=useState(initialItem?.id||'');
+  const [mode,setMode]=useState<'received'|'stock'>('received');
+  const [count,setCount]=useState(String(initialItem?.received??''));
+  const [purchaseAmount,setPurchaseAmount]=useState('0');
+  const [documentDate,setDocumentDate]=useState(today);
+  const [reason,setReason]=useState('');
+  const [reviewed,setReviewed]=useState(false);
+  useEffect(()=>setReviewed(false),[state.revision]);
+  const item=state.items.find(entry=>entry.id===itemId);
+  const batch=item?state.containers.find(container=>container.id===item.containerId):undefined;
+  const available=item?itemAvailable(state,item):0;
+  const expected=mode==='stock'?available:item?.received??0;
+  const difference=Number(count)-expected;
+  const relatedItems=initialItem?state.items.filter(entry=>!entry.gradeOf&&itemGroupKey(entry)===itemGroupKey(initialItem)
+    &&isReceived(state.containers.find(container=>container.id===entry.containerId))):[];
+  const edit=(change:()=>void)=>{change();setReviewed(false);};
+  const action:Action=modal.kind==='sharing'
+    ? {type:'container.sharing',payload:{id:root.id,enabled,scopes:costs.map(cost=>({costId:cost.id,scope:scopes[cost.id]??costScope(cost)})),date:documentDate,reason}}
+    : {type:'receipt.correct',payload:{itemId,mode,count, purchaseAmount:cents(Number(purchaseAmount)),date:documentDate,reason}};
+  let preview:State|undefined;
+  let previewError='';
+  try {
+    if(modal.kind==='receiptCorrection'&&count==='')throw Error('أدخل الكمية الفعلية لمعاينة الفرق.');
+    preview=perform(state,{...action,payload:{...action.payload,reason:reason||'معاينة التعديل'}});
+  } catch(error) {previewError=error instanceof Error?error.message:'تعذرت معاينة أثر التعديل.';}
+  async function submit(event:FormEvent){
+    event.preventDefault();
+    if(!preview||!reviewed||saving)return;
+    await onSave(action);
+  }
+  return <form className="valuation-editor" onSubmit={submit}>
+    {modal.kind==='sharing'?<>
+      <label className="check-row emphasized"><input type="checkbox" checked={enabled} onChange={event=>edit(()=>setEnabled(event.target.checked))}/>
+        <span>مشاركة مصاريف الحاويات<small>{root.code} · {root.name} · {containerAnnexes(state,root.id).length} ملحق</small></span>
+      </label>
+      <DataTable headers={['السند المصدر','المصروف','المبلغ بالشيكل','التوزيع حسب','نطاق التوزيع']} rows={costs.map(cost=>{
+        const source=state.containers.find(container=>container.id===cost.containerId);
+        return [source?.code||'',cost.name,money(cents(cost.amount*cost.fx)),basisLabels[cost.basis],
+          <select key="scope" aria-label={'نطاق '+cost.name+' '+source?.code} value={scopes[cost.id]??costScope(cost)} disabled={!enabled||cost.basis==='direct'}
+            onChange={event=>edit(()=>setScopes(previous=>({...previous,[cost.id]:event.target.value as NonNullable<Cost['scope']>})))}>
+            <option value="family">مشترك للمجموعة</option><option value="container">خاص بهذا السند</option>
+          </select>];
+      })} empty="يمكن تحديد نطاق كل مصروف عند إضافته لاحقًا."/>
+      <Notice>تُحتسب المصاريف الأصلية مرة واحدة عند المشاركة. تُستأنف الحصص اليدوية المحفوظة عند إيقاف المشاركة.</Notice>
+    </>:<>
+      <div className="form-grid">
+        <Field label="الصنف والدفعة" wide><select value={itemId} onChange={event=>edit(()=>{
+          const selected=relatedItems.find(entry=>entry.id===event.target.value)!;
+          setItemId(selected.id);setCount(String(mode==='stock'?itemAvailable(state,selected):selected.received));setPurchaseAmount('0');
+        })}>{relatedItems.map(entry=><option key={entry.id} value={entry.id}>
+          {state.containers.find(container=>container.id===entry.containerId)?.code} · {entry.model} · {entry.name} · {entry.color} {entry.size}
+        </option>)}</select></Field>
+        <Field label="نوع الكمية المدخلة"><select value={mode} onChange={event=>edit(()=>{
+          const selected=event.target.value as 'received'|'stock';setMode(selected);setCount(String(selected==='stock'?available:item?.received??0));
+        })}><option value="received">إجمالي الاستلام الصحيح</option><option value="stock">الرصيد الفعلي بعد المبيعات والتسويات</option></select></Field>
+        <Field label={mode==='stock'?'الرصيد الفعلي الموجود الآن':'إجمالي القطع السليمة المستلمة الصحيح'}>
+          <input required type="number" inputMode="numeric" min="0" max="10000000" step="1" value={count} onChange={event=>edit(()=>setCount(event.target.value))}/>
+        </Field>
+        <Field label="قيمة شراء إضافية مثبتة بالمستند" hint="إجمالي المبلغ الإضافي بالشيكل. تصحيح العدّ مع ثبات فاتورة الشراء قيمته صفر.">
+          <MoneyInput required value={purchaseAmount} onChange={value=>edit(()=>setPurchaseAmount(value))}/>
+        </Field>
+      </div>
+      <div className="breakdown">
+        <div><span>{mode==='stock'?'الرصيد المتوقع الآن':'السليم المستلم المسجل'}</span><strong>{qty(expected)} قطعة</strong></div>
+        <div><span>فرق التصحيح</span><strong>{difference>0?'+':''}{qty(difference)} قطعة</strong></div>
+      </div>
+    </>}
+    <div className="form-grid">
+      <Field label="تاريخ سند التعديل"><input required type="date" min={modal.kind==='sharing'?root.receivedAt.slice(0,10):batch?.receivedAt.slice(0,10)} max={today()}
+        value={documentDate} onChange={event=>edit(()=>setDocumentDate(event.target.value))}/></Field>
+      <Field label="سبب التعديل / مرجع المستند" wide><textarea required rows={2} value={reason} onChange={event=>edit(()=>setReason(event.target.value))}/></Field>
+    </div>
+    {previewError?<ErrorNote>{previewError}</ErrorNote>:preview&&<ValuationPreview before={state} after={preview} containerId={root.id}/>}
+    <label className="check-row emphasized"><input required type="checkbox" checked={reviewed} disabled={!preview} onChange={event=>setReviewed(event.target.checked)}/>
+      <span>راجعت فرق الكميات والتكلفة وأثره على المبيعات المسجلة</span>
+    </label>
+    <div className="modal-actions">
+      <button type="button" className="button" disabled={saving} onClick={onCancel}>إلغاء</button>
+      <button type="submit" className="button primary" disabled={saving||!preview||!reviewed||!reason.trim()}>
+        {saving?<LoaderCircle className="spin"/>:<Check/>}اعتماد التعديل
+      </button>
+    </div>
+  </form>;
 }
 
 function WarehouseEditor({modal,state,saving,onSave,onCancel}:{
